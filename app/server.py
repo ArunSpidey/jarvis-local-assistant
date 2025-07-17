@@ -1,11 +1,13 @@
-# server.py
-
 from flask import Flask, request, jsonify, send_from_directory
-from whisper_stt import transcribe
-from jarvis_logger import logger
+from app.whisper_stt import transcribe
+from app.jarvis_logger import logger
+from app.llm_handler import query_llm
+from app.intent_router import route_intent
 import tempfile
 import os
+import time
 import logging as flask_logging
+
 flask_logging.getLogger('werkzeug').setLevel(flask_logging.ERROR)
 
 app = Flask(__name__)
@@ -46,60 +48,29 @@ def handle_stt():
     return jsonify({"transcription": result})
 
 
+@app.route("/command", methods=["POST"])
+def handle_command():
+    overall_start = time.time()
+    logger.info("========== START JARVIS COMMAND ==========")
 
+    try:
+        data = request.get_json()
+        user_input = data.get("command", "").strip()
+        logger.info(f"[STT] → Transcribed Text: {user_input}")
 
-@app.route("/benchmark")
-def benchmark_page():
-    return send_from_directory(os.path.dirname(__file__), "voice_benchmark.html")
+        logger.info("[INTENT] → Sending to LLM...")
+        parsed = query_llm(user_input)
+        logger.info(f"[INTENT] → Parsed Response: {parsed}")
 
+        logger.info("[ACTION] → Routing Intent...")
+        action_result = route_intent(parsed)
 
-from faster_whisper import WhisperModel
-import time
+        logger.info(f"[ACTION] → Final Message: {action_result}")
+        duration = round(time.time() - overall_start, 2)
+        logger.info(f"========== END JARVIS COMMAND (Total: {duration} sec) ==========")
 
-@app.route("/benchmark-stt", methods=["POST"])
-def benchmark_stt():
-    if 'audio' not in request.files:
-        return jsonify({"error": "No audio file"}), 400
+        return jsonify({"message": action_result})
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmpfile:
-        request.files['audio'].save(tmpfile.name)
-        tmp_path = tmpfile.name
-
-    combos = [
-        {"model": "tiny",  "beam_size": 1, "best_of": 1},
-        {"model": "tiny",  "beam_size": 5, "best_of": 5},
-        {"model": "base",  "beam_size": 1, "best_of": 1},
-        {"model": "base",  "beam_size": 5, "best_of": 5},
-        {"model": "small", "beam_size": 1, "best_of": 1},
-        {"model": "small", "beam_size": 5, "best_of": 5},
-    ]
-
-    results = []
-    for cfg in combos:
-        model = WhisperModel(cfg["model"], compute_type="int8")
-        start = time.time()
-        segments, _ = model.transcribe(
-            tmp_path,
-            language="en",
-            beam_size=cfg["beam_size"],
-            best_of=cfg["best_of"]
-        )
-        end = time.time()
-        result_text = " ".join([seg.text.strip() for seg in segments])
-        results.append({
-            "model": cfg["model"],
-            "beam_size": cfg["beam_size"],
-            "best_of": cfg["best_of"],
-            "time": round(end - start, 2),
-            "text": result_text
-        })
-
-    os.remove(tmp_path)
-    return jsonify({"results": results})
-
-
-if __name__ == "__main__":
-    logger.info("========== SERVER STARTED ==========")
-    context = ('certs/cert.pem', 'certs/key.pem')
-    app.run(host="0.0.0.0", port=5000, ssl_context=context, debug=False)
-
+    except Exception as e:
+        logger.exception("Error in /command:")
+        return jsonify({"message": f"❌ Error: {str(e)}"}), 500

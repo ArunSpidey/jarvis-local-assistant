@@ -1,5 +1,5 @@
 from faster_whisper import WhisperModel
-from jarvis_logger import logger
+from app.jarvis_logger import logger
 import os
 
 model = WhisperModel("small", compute_type="int8")

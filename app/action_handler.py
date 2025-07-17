@@ -12,6 +12,10 @@ import difflib
 from app.io_utils import read_json, write_json, current_date_str
 from app.llm_handler import query_llm
 
+def execute_action(parsed_json: dict) -> str:
+    # TEMP stub logic until we fully implement
+    return "[ACTION] Logic not implemented yet"
+
 def handle_intent(parsed, original_command):
     """
     Main dispatcher for parsed user commands.
