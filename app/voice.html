@@ -182,6 +182,7 @@
 
         async function startRecording() {
             // Reset state
+            fetch('/preload-model', { method: 'POST' });
             audioChunks = [];
             resultDiv.innerHTML = "";
             recordButton.disabled = true;

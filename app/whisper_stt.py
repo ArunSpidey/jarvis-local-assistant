@@ -9,8 +9,6 @@ def transcribe(audio_path):
         logger.error(f"[STT] → File not found: {audio_path}")
         return ""
 
-    logger.info(f"[STT] → Transcribing: {audio_path}")
-
     segments, _ = model.transcribe(
         audio_path,
         language="en",
