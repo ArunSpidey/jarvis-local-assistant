@@ -34,40 +34,32 @@ def query_llm(user_input):
     payload = {
         "model": MODEL_NAME,
         "prompt": prompt,
-        "stream": False
+        "stream": False,
+        "format": "json"
     }
 
     try:
         res = requests.post(OLLAMA_URL, json=payload)
-        raw_text = res.text.strip()
-        logging.debug("OLLAMA RAW RESPONSE: %s", raw_text)
 
         data = res.json()
-        response_text = data.get("response", "").strip()
+        parsed = data.get("response", None)
 
-        if not response_text:
+        if not parsed:
             logging.error("LLM returned empty response.")
             return None
 
-        if response_text.startswith("```"):
-            response_text = re.sub(r"^```(?:json)?", "", response_text, flags=re.IGNORECASE).strip()
-            response_text = re.sub(r"```$", "", response_text).strip()
-
-        json_start = response_text.find("{")
-        json_end = response_text.rfind("}")
-        if json_start == -1 or json_end == -1:
-            logging.error("No JSON object found in LLM response.")
-            logging.debug("Response content: %s", response_text)
+        try:
+            structured = json.loads(parsed)
+        except json.JSONDecodeError as e:
+            logging.error("Failed to parse JSON from LLM response: %s", e)
+            logging.debug("Response content: %s", parsed)
             return None
-
-        cleaned_json = response_text[json_start:json_end + 1]
-        logging.debug("CLEANED JSON: %s", cleaned_json)
 
         # ✅ Log to clean training log
         llm_logger.info("User Command: %s", user_input)
-        llm_logger.info("LLM Parsed: %s", cleaned_json)
+        llm_logger.info("LLM Parsed: %s", json.dumps(structured, indent=2))
 
-        return json.loads(cleaned_json)
+        return structured
 
     except Exception as e:
         logging.error("LLM error: %s", e)

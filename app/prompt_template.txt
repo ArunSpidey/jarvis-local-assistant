@@ -121,5 +121,5 @@ User: show me today’s todos
 
 ---
 
-Now extract structured JSON for this command:
-"{user_input}"
+
+Now respond with a JSON object only, following the exact schema and values above, using Ollama's native --format json style. No comments or explanations should be included.

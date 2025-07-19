@@ -1,3 +1,7 @@
+def normalize(text: str) -> str:
+    if not text: return ""
+    return " ".join(sorted(text.lower().strip().split()))
+
 from app.io_utils import read_json, write_json
 from app.jarvis_logger import logger
 
@@ -44,22 +48,67 @@ def execute_action(parsed_json: dict) -> str:
 
 def _add_or_update_inventory(data):
     db = read_json("inventory")
+    data.setdefault("previous_location", "")
     items = data["item"] if isinstance(data["item"], list) else [data["item"]]
+    updated = []
+    added = []
+
     for item in items:
-        db.append({
-            "item": item,
-            "location": data.get("location", ""),
-            "room": data.get("room", ""),
-            "quantity": data.get("quantity", 1)
-        })
+        matched_entries = [
+            entry for entry in db
+            if normalize(entry["item"]) == normalize(item)
+        ]
+
+        # If update_inventory, try to narrow by location/room if provided
+        if data["action"] == "update_inventory":
+            if data.get("location"):
+                matched_entries = [e for e in matched_entries if normalize(e.get("location", "")) == normalize(data["previous_location"] or "")]
+            if data.get("room"):
+                matched_entries = [e for e in matched_entries if normalize(e.get("room", "")) == normalize(data["room"])]
+
+        match = matched_entries[0] if matched_entries else None
+
+        if match:
+            if data["action"] == "update_inventory":
+                if "location" in data:
+                    match["location"] = data["location"]
+                if "room" in data:
+                    match["room"] = data["room"]
+                if "quantity" in data:
+                    match["quantity"] = data["quantity"]
+                updated.append(item)
+            else:
+                # fallback to additive behavior
+                db.append({
+                    "item": item,
+                    "location": data.get("location", ""),
+                    "room": data.get("room", ""),
+                    "quantity": data.get("quantity", 1)
+                })
+                added.append(item)
+        else:
+            # add if no exact match found
+            db.append({
+                "item": item,
+                "location": data.get("location", ""),
+                "room": data.get("room", ""),
+                "quantity": data.get("quantity", 1)
+            })
+            added.append(item)
+
     write_json("inventory", db)
-    return f"✅ {'Updated' if data['action']=='update_inventory' else 'Added'} {', '.join(items)} to inventory."
+    status = []
+    if added:
+        status.append(f"✅ Added {', '.join(added)} to inventory.")
+    if updated:
+        status.append(f"✅ Updated {', '.join(updated)} in inventory.")
+    return " ".join(status)
 
 def _remove_inventory(data):
     db = read_json("inventory")
     items = data["item"] if isinstance(data["item"], list) else [data["item"]]
     original_len = len(db)
-    db = [entry for entry in db if entry["item"] not in items]
+    db = [entry for entry in db if normalize(entry["item"]) not in [normalize(i) for i in items]]
     write_json("inventory", db)
     removed_count = original_len - len(db)
     return f"✅ Removed {removed_count} item(s) from inventory."
@@ -79,7 +128,7 @@ def _remove_shopping(data):
     db = read_json("shopping")
     items = data["item"] if isinstance(data["item"], list) else [data["item"]]
     original_len = len(db)
-    db = [entry for entry in db if entry["item"] not in items]
+    db = [entry for entry in db if normalize(entry["item"]) not in [normalize(i) for i in items]]
     write_json("shopping", db)
     removed_count = original_len - len(db)
     return f"✅ Removed {removed_count} item(s) from shopping list."
@@ -96,7 +145,7 @@ def _add_todo(data):
 def _remove_todo(data):
     db = read_json("todo")
     task = data["task"]
-    db = [entry for entry in db if entry["task"] != task]
+    db = [entry for entry in db if normalize(entry["task"]) != normalize(task)]
     write_json("todo", db)
     return f"✅ Removed todo: {task}"
 
