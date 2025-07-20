@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JARVIS Voice Command</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color-dark: #0A0A10;
+            --container-bg: #1A1A22;    
+            --text-color-light: #E0E0E0;
+            --primary-color: #00F0FF;
+            --secondary-color: #A0A0FF;
+            --success-color: #00FF99;
+            --error-color: #FF6347;
+            --shadow-primary: 0 0 15px rgba(0, 240, 255, 0.5);
+            --shadow-glow: 0 0 10px rgba(0, 240, 255, 0.7), 0 0 20px rgba(0, 240, 255, 0.5);
+        }
+        
+        body {
+            font-family: 'Poppins', sans-serif;
+            background: var(--bg-color-dark);
+            background-image: radial-gradient(circle at center, #151520 0%, #0A0A10 75%);
+            color: var(--text-color-light);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            padding: 20px;
+        }
+
+        .container {
+            background-color: var(--container-bg);
+            border-radius: 20px;
+            padding: 40px;
+            box-shadow: var(--shadow-primary);
+            text-align: center;
+            max-width: 600px;
+            width: 100%;
+            border: 1px solid rgba(0, 240, 255, 0.2);
+            backdrop-filter: blur(5px);
+        }
+
+        h1 {
+            font-weight: 600;
+            font-size: 2.5rem;
+            color: var(--primary-color);
+            text-shadow: var(--shadow-primary);
+            margin-bottom: 10px;
+        }
+
+        p {
+            font-size: 1rem;
+            color: var(--secondary-color);
+            margin-bottom: 30px;
+        }
+
+        .microphone-button {
+            background: transparent;
+            border: 3px solid var(--primary-color);
+            color: var(--text-color-light);
+            font-size: 1.2rem;
+            font-weight: 600;
+            padding: 1.2rem 3rem;
+            border-radius: 50px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            position: relative;
+            overflow: hidden;
+            box-shadow: var(--shadow-primary);
+        }
+        
+        .microphone-button:hover:not(.listening) {
+            background-color: rgba(0, 240, 255, 0.1);
+            transform: scale(1.05);
+        }
+
+        .microphone-button:active {
+            transform: scale(0.95);
+        }
+
+        .microphone-button.listening {
+            background: rgba(0, 240, 255, 0.2);
+            box-shadow: var(--shadow-glow);
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0% { box-shadow: 0 0 10px rgba(0, 240, 255, 0.7), 0 0 20px rgba(0, 240, 255, 0.5); }
+            50% { box-shadow: 0 0 20px rgba(0, 240, 255, 1), 0 0 30px rgba(0, 240, 255, 0.8); }
+            100% { box-shadow: 0 0 10px rgba(0, 240, 255, 0.7), 0 0 20px rgba(0, 240, 255, 0.5); }
+        }
+
+        .status-container {
+            margin-top: 2rem;
+            min-height: 20px;
+        }
+
+        #status {
+            font-size: 0.9rem;
+            color: var(--secondary-color);
+            transition: color 0.3s ease;
+        }
+
+        #status.success { color: var(--success-color); }
+        #status.error { color: var(--error-color); }
+        #status.processing { color: var(--primary-color); }
+        
+        #result-container {
+            margin-top: 1.5rem;
+            background-color: #111118;
+            padding: 20px;
+            border-radius: 10px;
+            min-height: 100px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            text-align: left;
+            white-space: pre-wrap;
+            overflow-wrap: break-word;
+            word-break: break-all;
+            transition: all 0.5s ease;
+        }
+
+        #result-container.active {
+            border-color: var(--primary-color);
+            box-shadow: 0 0 5px rgba(0, 240, 255, 0.3);
+        }
+
+        #result {
+            font-size: 1rem;
+            color: var(--text-color-light);
+        }
+
+        .result-line {
+            display: block;
+            margin-bottom: 10px;
+        }
+
+        .result-line .label {
+            color: var(--primary-color);
+            font-weight: 600;
+        }
+
+        .result-line .time {
+            font-size: 0.9rem;
+            color: var(--secondary-color);
+            opacity: 0.7;
+        }
+
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>JARVIS Voice Interface</h1>
+        <p>Click the button and speak your command. I will stop listening after a short pause.</p>
+        
+        <button class="microphone-button" id="recordButton" onclick="startRecording()">Start Listening</button>
+        
+        <div class="status-container">
+            <div id="status">Idle</div>
+        </div>
+        
+        <div id="result-container">
+            <div id="result"></div>
+        </div>
+    </div>
+
+    <script>
+        let mediaRecorder, audioChunks = [], silenceTimer;
+        const recordButton = document.getElementById("recordButton");
+        const statusDiv = document.getElementById("status");
+        const resultContainer = document.getElementById("result-container");
+        const resultDiv = document.getElementById("result");
+
+        function updateStatus(text, type = 'idle') {
+            statusDiv.textContent = text;
+            statusDiv.className = type;
+        }
+
+        async function startRecording() {
+            // Reset state
+            fetch('/preload-model', { method: 'POST' });
+            audioChunks = [];
+            resultDiv.innerHTML = "";
+            recordButton.disabled = true;
+            recordButton.classList.add('listening');
+            resultContainer.classList.remove('active');
+            updateStatus("Requesting mic...");
+
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const source = audioContext.createMediaStreamSource(stream);
+                const analyser = audioContext.createAnalyser();
+                source.connect(analyser);
+                const dataArray = new Uint8Array(analyser.fftSize);
+                
+                mediaRecorder = new MediaRecorder(stream);
+                updateStatus("Recording... (pause to end)", 'success');
+
+                mediaRecorder.ondataavailable = event => audioChunks.push(event.data);
+
+                mediaRecorder.onstop = async () => {
+                    stream.getTracks().forEach(track => track.stop());
+                    const blob = new Blob(audioChunks, { type: 'audio/wav' });
+                    const formData = new FormData();
+                    formData.append('audio', blob, 'input.wav');
+
+                    recordButton.disabled = false;
+                    recordButton.classList.remove('listening');
+                    updateStatus("Processing...", 'processing');
+                    resultContainer.classList.add('active');
+
+                    const startTime = performance.now();
+
+                    try {
+                        const response = await fetch("/stt", {
+                            method: 'POST',
+                            body: formData
+                        });
+
+                        const data = await response.json();
+                        const endTime = performance.now();
+                        const roundTrip = ((endTime - startTime) / 1000).toFixed(2);
+                        
+                        resultDiv.innerHTML = `
+                            <span class="result-line"><span class="label">You said:</span> ${data.transcription}</span>
+                            <span class="result-line"><span class="label">Total time:</span> ${roundTrip} sec</span>
+                        `;
+                        updateStatus("Done", 'success');
+                    } catch (err) {
+                        console.error("Fetch error:", err);
+                        resultDiv.innerHTML = `<span class="result-line"><span class="label">Error:</span> ${err.message}</span>`;
+                        updateStatus("Fetch failed", 'error');
+                    }
+                };
+
+                mediaRecorder.start();
+
+                // Silence detection loop
+                let silenceStart = null;
+                const silenceThreshold = 5; // Minimum signal level
+                const silenceDuration = 1500; // ms
+
+                const checkSilence = () => {
+                    if (mediaRecorder.state === 'inactive') return;
+
+                    analyser.getByteTimeDomainData(dataArray);
+                    const max = Math.max(...dataArray);
+                    const min = Math.min(...dataArray);
+                    const amplitude = max - min;
+
+                    const now = Date.now();
+                    if (amplitude < silenceThreshold) {
+                        if (!silenceStart) silenceStart = now;
+                        else if (now - silenceStart > silenceDuration) {
+                            mediaRecorder.stop();
+                            return;
+                        }
+                    } else {
+                        silenceStart = null;
+                    }
+                    requestAnimationFrame(checkSilence);
+                };
+
+                checkSilence();
+            } catch (e) {
+                console.error("Mic error", e);
+                recordButton.disabled = false;
+                recordButton.classList.remove('listening');
+                updateStatus("Microphone error", 'error');
+                resultContainer.classList.remove('active');
+            }
+        }
+    </script>
+</body>
+</html>
