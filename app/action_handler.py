@@ -4,6 +4,7 @@ def normalize(text: str) -> str:
 
 from app.io_utils import read_json, write_json
 from app.jarvis_logger import logger
+from app.memory_manager import add_to_memory
 
 def execute_action(parsed_json: dict) -> str:
     action = parsed_json.get("action")
@@ -97,6 +98,14 @@ def _add_or_update_inventory(data):
             added.append(item)
 
     write_json("inventory", db)
+    for item in added:
+        entry = {
+            "item": item,
+            "location": data.get("location", ""),
+            "room": data.get("room", ""),
+            "quantity": data.get("quantity", 1)
+        }
+        add_to_memory("inventory", entry)
     status = []
     if added:
         status.append(f"✅ Added {', '.join(added)} to inventory.")

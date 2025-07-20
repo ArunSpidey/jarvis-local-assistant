@@ -10,23 +10,38 @@ import json
 import re
 import logging
 from app.config import MODEL_NAME, OLLAMA_URL
-
-# --- Main app logger will still go to listener.log ---
-# --- This new one is for clean LLM-to-pattern log ---
-llm_logger = logging.getLogger("llm_commands")
-llm_logger.setLevel(logging.INFO)
-llm_logger.addHandler(logging.FileHandler("logs/llm_commands.log"))
-llm_logger.propagate = False
+from app.memory_manager import query_memory
 
 def query_llm(user_input):
     """
     Send user command to LLM, parse structured JSON response.
     Handles cleaning and logging of LLM output.
     """
+    # Step 1 & 2: Query memory across all namespaces and prepare context
+    namespaces = ["inventory", "shopping", "todo"]
+    memory_contexts = []
+    for ns in namespaces:
+        slices = query_memory(user_input, ns)
+        if slices:
+            # Limit to top 5 entries and sanitize newlines
+            sanitized = [entry.replace("\n", " ") for entry in slices[:5]]
+            block = f"<memory namespace=\"{ns}\">\n" + "\n".join(sanitized) + "\n</memory>"
+            memory_contexts.append(block)
+    if memory_contexts:
+        memory_context = "<BEGIN MEMORY>\n" + "\n\n".join(memory_contexts) + "\n<END MEMORY>"
+        logging.info("[RAG] Injected Memory Context:\n%s", memory_context)
+    else:
+        memory_context = "<BEGIN MEMORY>\n(No previous entries found)\n<END MEMORY>"
+
+    # Log memory context for LLM specifically
+    logging.info("========== BEGIN INJECTED MEMORY ==========\n%s\n========== END INJECTED MEMORY ==========", memory_context.strip())
+
+    # Step 3: Inject memory into the prompt
     try:
         with open("app/prompt_template.txt", "r") as f:
             template = f.read()
-        prompt = template.replace("{user_input}", user_input)
+        prompt = template.replace("{memory_context}", memory_context).replace("{user_input}", user_input)
+        logging.info("========== BEGIN FINAL PROMPT ==========\n%s\n========== END FINAL PROMPT ==========", prompt)
     except Exception as e:
         logging.error("Failed to load prompt template: %s", e)
         return None
@@ -55,9 +70,8 @@ def query_llm(user_input):
             logging.debug("Response content: %s", parsed)
             return None
 
-        # ✅ Log to clean training log
-        llm_logger.info("User Command: %s", user_input)
-        llm_logger.info("LLM Parsed: %s", json.dumps(structured, indent=2))
+        logging.info("User Command: %s", user_input)
+        logging.info("LLM Parsed: %s", json.dumps(structured, indent=2))
 
         return structured
 
