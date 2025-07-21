@@ -1,7 +1,7 @@
-# ==============================================================================
+# ===============================================================================
 # OPTIMIZED JARVIS SCRIPT (FIXED)
 # Includes defensive memory update, anti-hallucination prompt, and soft fallback for non-JSON replies.
-# ==============================================================================
+# ===============================================================================
 
 import os
 import json
@@ -14,11 +14,17 @@ import re
 from datetime import datetime
 from typing import Dict, Optional, Any
 import chromadb
-from chromadb import PersistentClient
 from sentence_transformers import SentenceTransformer
 from flask import Flask, request, jsonify, send_from_directory
 from faster_whisper import WhisperModel
-from atexit import register
+
+def get_recent_logs(line_count=50):
+    try:
+        with open(log_file, "r") as f:
+            lines = f.readlines()
+        return lines[-line_count:]
+    except Exception:
+        return []
 
 os.makedirs("logs", exist_ok=True)
 log_file = "logs/jarvis.log"
@@ -34,6 +40,7 @@ logger = logging.getLogger("jarvis")
 
 MODEL_NAME = "mistral"
 OLLAMA_URL = "http://localhost:11434/api/generate"
+DEBUG = False
 
 try:
     stt_model = WhisperModel("small", compute_type="int8")
@@ -56,7 +63,7 @@ DB_DIR = "vector_store"
 COLLECTION_NAME = "jarvis_memory"
 try:
     embedding_model = SentenceTransformer("nomic-ai/nomic-embed-text-v1", trust_remote_code=True)
-    client = PersistentClient(path=DB_DIR)
+    client = chromadb.PersistentClient(path=DB_DIR)
     collection = client.get_or_create_collection(COLLECTION_NAME)
     MEMORY_ENABLED = True
 except Exception as e:
@@ -77,6 +84,36 @@ def update_memory(document_text: str, metadata: Optional[Dict[str, Any]] = None)
         metadata = {}
     metadata.update({"timestamp": timestamp, "text": document_text})
 
+    if "item" in metadata:
+        thread_key = metadata["item"]
+        thread_id = hashlib.md5(thread_key.encode('utf-8')).hexdigest()
+        metadata["thread_id"] = thread_id
+    else:
+        thread_id = None
+
+    # Flatten nested dicts (e.g., location) before passing to ChromaDB
+    flat_meta = {}
+    for k, v in metadata.items():
+        if isinstance(v, dict):
+            for subk, subv in v.items():
+                flat_meta[f"{k}_{subk}"] = subv
+        else:
+            flat_meta[k] = v
+    metadata = flat_meta
+
+    vague_keywords = ["this", "that", "next", "meant"]
+    if any(kw in document_text.lower() for kw in vague_keywords) and thread_id:
+        try:
+            past_results = collection.get(include=["metadatas", "documents", "ids"])
+            for doc, meta, doc_id_old in zip(past_results["documents"], past_results["metadatas"], past_results["ids"]):
+                if any(kw in doc.lower() for kw in vague_keywords) and "thread_id" not in meta:
+                    patched_meta = meta.copy()
+                    patched_meta["thread_id"] = thread_id
+                    collection.update(ids=[doc_id_old], metadatas=[patched_meta])
+                    logger.info(f"[MEMORY] Patched vague entry {doc_id_old} with thread_id {thread_id}")
+        except Exception as e:
+            logger.warning(f"[MEMORY] Failed to patch vague references: {e}")
+
     try:
         doc = f"user_statement: {document_text}"
         embedding = embedding_model.encode([doc], convert_to_tensor=False)[0].tolist()
@@ -85,55 +122,46 @@ def update_memory(document_text: str, metadata: Optional[Dict[str, Any]] = None)
     except Exception as e:
         logger.error(f"[MEMORY] Failed to add memory: {e}")
 
-def query_memory(user_input: str, top_k=5) -> list:
+def query_memory(user_input: str, top_k=20) -> list:
     if not MEMORY_ENABLED: return []
     try:
         embedding = embedding_model.encode([user_input], convert_to_tensor=False)[0].tolist()
+        query_start = time.time()
         results = collection.query(query_embeddings=[embedding], n_results=top_k)
-        return results.get("documents", [[]])[0]
+        logger.info(f"[VECTOR] Query took {round(time.time() - query_start, 2)} sec")
+        return results.get("documents", [[]])[0], results.get("metadatas", [[]])[0]
     except Exception as e:
         logger.error(f"[MEMORY] Failed to query memory: {e}")
-        return []
+        return [], []
 
 def sync_memory_on_startup():
     if not MEMORY_ENABLED:
         logger.warning("[MEMORY] Sync skipped: Memory Manager is disabled.")
         return
-    logger.info("[MEMORY] Syncing from log...")
-    try:
-        all_ids = collection.get()["ids"]
-        if all_ids:
-            collection.delete(ids=all_ids)
-    except Exception as e:
-        logger.error(f"[MEMORY] Failed to clear existing memory: {e}")
-    if os.path.exists(llm_memory_log_file):
-        with open(llm_memory_log_file, "r") as f:
-            for line in f:
-                try:
-                    entry = json.loads(line)
-                    update_memory(entry.get("user_command"), metadata=entry.get("llm_response_json"))
-                except json.JSONDecodeError as e:
-                    logger.error(f"[MEMORY] Failed to parse log line: {e}")
-    logger.info("[MEMORY] Sync complete.")
-
-def persist_memory_on_shutdown():
-    if client and MEMORY_ENABLED:
-        try:
-            client.persist()
-            logger.info("ChromaDB persisted successfully.")
-        except Exception as e:
-            logger.error(f"Failed to persist ChromaDB: {e}")
-
-register(persist_memory_on_shutdown)
+    logger.info("[MEMORY] Skipping rebuild from jsonl – using ChromaDB persistent memory.")
 
 PROMPT_TEMPLATE = """You are JARVIS, a memory-aware personal assistant. Use MEMORY CONTEXT to avoid hallucination.
 
 - For action commands (add, move, update, etc): respond in structured JSON with fields like item, location, room, etc.
 - For vague or open-ended questions: reply in natural English.
 - NEVER guess data. If unsure or not present in memory, say so or skip.
-- Do not fabricate quantity, room, or items.
+- Do not fabricate quantity, room, or items. Do not assume location unless explicitly mentioned.
+- Prefer short responses when the user asks for short or quick answers.
 
-MEMORY CONTEXT:
+Examples:
+
+USER INSTRUCTION:
+Add 2 green bottles to kitchen shelf.
+→ {"action": "add", "item": "green bottles", "quantity": 2, "location": {"room": "kitchen", "specific_location": "shelf"}}
+
+USER INSTRUCTION:
+What items do we have in kitchen?
+→ Based on memory, you have green bottles in the kitchen shelf.
+
+KNOWN FACTS:
+{known_facts}
+
+MEMORY:
 {memory_context}
 
 USER INSTRUCTION:
@@ -149,22 +177,46 @@ def try_parse_json(text: str) -> Optional[Dict]:
         return None
 
 def query_llm(user_input: str) -> str:
-    memory_contexts = query_memory(user_input)
-    memory_context_str = "\n".join(memory_contexts) if memory_contexts else "(No prior memory)"
-    logger.info(f"[LLM] Injected memory:\n{memory_context_str}")
-    prompt = PROMPT_TEMPLATE.replace("{memory_context}", memory_context_str).replace("{user_input}", user_input)
+    memory_contexts, metadata_contexts = query_memory(user_input)
+    memory_context_str = ""
+    for doc in memory_contexts:
+        match = re.match(r"user_statement: (.*)", doc)
+        sentence = match.group(1) if match else doc
+        memory_context_str += f"- {sentence}\n"
+
+    known_facts_str = ""
+    for meta in metadata_contexts:
+        if isinstance(meta, dict) and "item" in meta and "location_room" in meta:
+            item = meta.get("item")
+            room = meta.get("location_room")
+            location = meta.get("location_specific_location", "")
+            if item and room:
+                loc_string = f"{room} → {location}" if location else room
+                known_facts_str += f"- {item} is located in {loc_string}\n"
+
+    if not memory_context_str:
+        memory_context_str = "(No prior memory)"
+    if not known_facts_str:
+        known_facts_str = "(No known facts)"
+
+    logger.info(f"[VECTOR] Retrieved {len(memory_contexts)} memory entries.")
+    prompt = PROMPT_TEMPLATE.replace("{memory_context}", memory_context_str).replace("{user_input}", user_input).replace("{known_facts}", known_facts_str)
+    if DEBUG:
+        logger.info(f"[LLM] Prompt: Injected {len(memory_contexts)} memory lines → model: {MODEL_NAME}")
+        logger.info(prompt)
     payload = {"model": MODEL_NAME, "prompt": prompt, "stream": False}
 
     for attempt in range(3):
         try:
+            llm_start = time.time()
             res = requests.post(OLLAMA_URL, json=payload, timeout=20)
             res.raise_for_status()
             raw_response = res.json().get("response", "").strip()
-            logger.info(f"[LLM] Raw: {raw_response}")
-            parsed_json = try_parse_json(raw_response)
+            logger.info(f"[LLM] Response took {round(time.time() - llm_start, 2)} sec → {raw_response}")
 
             with open(llm_memory_log_file, "a") as f:
                 entry = {"user_command": user_input, "timestamp": datetime.now().isoformat()}
+                parsed_json = try_parse_json(raw_response)
                 if parsed_json:
                     entry["llm_response_json"] = parsed_json
                 else:
@@ -190,14 +242,17 @@ def home():
 @app.route("/stt", methods=["POST"])
 def handle_stt():
     overall_start = time.time()
-    logger.info("========== START JARVIS VOICE COMMAND ==========")
+    logger.info("========== START JARVIS COMMAND ==========")
     if 'audio' not in request.files:
         return jsonify({"error": "No audio file"}), 400
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmpfile:
         request.files['audio'].save(tmpfile.name)
         tmp_path = tmpfile.name
     try:
+        transcription_start = time.time()
         transcription = transcribe(tmp_path)
+        transcription_duration = time.time() - transcription_start
+        logger.info(f"[STT] Received audio → Transcribed in {round(transcription_duration, 2)} sec")
         if not transcription or transcription == "[STT model not loaded]":
             return jsonify({"error": "STT failed or model not loaded."}), 500
         response_message = query_llm(transcription)
@@ -205,36 +260,49 @@ def handle_stt():
         os.remove(tmp_path)
     duration = round(time.time() - overall_start, 2)
     logger.info(f"========== END JARVIS COMMAND (Total: {duration} sec) ==========")
-    return jsonify({"transcription": transcription, "message": response_message, "time_taken": duration})
+    return jsonify({
+        "transcription": transcription,
+        "message": response_message,
+        "time_taken": duration,
+        "logs": get_recent_logs()
+    })
 
 @app.route("/command", methods=["POST"])
 def handle_command():
     overall_start = time.time()
-    logger.info("========== START JARVIS TEXT COMMAND ==========")
+    logger.info("========== START JARVIS COMMAND ==========")
     data = request.get_json()
-    user_input = data.get("command", "").strip()
+    user_input = data.get("text", "").strip()
     if not user_input:
         return jsonify({"message": "❌ Empty command received."}), 400
     response_message = query_llm(user_input)
     duration = round(time.time() - overall_start, 2)
     logger.info(f"========== END JARVIS COMMAND (Total: {duration} sec) ==========")
-    return jsonify({"message": response_message})
+    return jsonify({
+        "message": response_message,
+        "time_taken": duration,
+        "logs": get_recent_logs()
+    })
 
-import signal
-import sys
+@app.route("/restart-server", methods=["POST"])
+def restart_server():
+    logger.warning("Server restart requested via frontend. Exiting.")
+    os._exit(1)
 
-def handle_sigint(sig, frame):
-    logger.info("[SIGNAL] Received SIGINT (Ctrl+C). Persisting memory before exit...")
-    persist_memory_on_shutdown()
-    sys.exit(0)
-
-signal.signal(signal.SIGINT, handle_sigint)
-
-@app.route("/persist", methods=["POST"])
-def manual_persist():
-    logger.info("[MANUAL] Manual persist triggered via /persist")
-    persist_memory_on_shutdown()
-    return jsonify({"message": "✅ Memory manually persisted."})
+@app.route("/vectors", methods=["GET"])
+def fetch_vectors():
+    count = int(request.args.get("count", 10))
+    if not MEMORY_ENABLED:
+        return jsonify({"error": "Memory disabled."}), 400
+    try:
+        results = collection.get(include=["metadatas", "documents"], limit=count)
+        entries = []
+        for doc, meta in zip(results.get("documents", []), results.get("metadatas", [])):
+            entries.append({"text": doc, "metadata": meta})
+        return jsonify({"entries": entries})
+    except Exception as e:
+        logger.error(f"[VECTOR] Failed to fetch entries: {e}")
+        return jsonify({"error": "Vector fetch failed"}), 500
 
 if __name__ == "__main__":
     sync_memory_on_startup()
